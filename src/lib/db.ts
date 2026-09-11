@@ -1,11 +1,7 @@
-import { DatabaseSync } from "node:sqlite";
-import path from "node:path";
-import fs from "node:fs";
+import { createClient, type Client } from "@libsql/client";
 
-const SCHEMA = `
-PRAGMA journal_mode = WAL;
+const SCHEMA_STATEMENTS = `
 PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
 
 CREATE TABLE IF NOT EXISTS enquiries (
   id                     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,39 +60,94 @@ CREATE INDEX IF NOT EXISTS idx_enquiries_created ON enquiries(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_items_enquiry     ON enquiry_items(enquiry_id);
 `;
 
-function open(): DatabaseSync {
-  const file =
-    process.env.DATABASE_FILE ?? path.join(process.cwd(), "data", "workshop.db");
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
-  db.exec(SCHEMA);
+async function open(): Promise<Client> {
+  const url = process.env.TURSO_DATABASE_URL;
+  const authToken = process.env.TURSO_AUTH_TOKEN;
+
+  if (!url) {
+    throw new Error(
+      "TURSO_DATABASE_URL is not set. Add it to .env.local (see .env.example)."
+    );
+  }
+
+  const client = createClient({ url, authToken });
+
+  // Multiple statements separated by ';' in one call.
+  await client.executeMultiple(SCHEMA_STATEMENTS);
 
   // "Like order number 101 or something simple like that."
   // Read first so an already-seeded database is never written to on open —
   // otherwise every process start contends for the write lock.
-  const seeded = db
-    .prepare(`SELECT 1 FROM sqlite_sequence WHERE name = 'enquiries'`)
-    .get();
-  if (!seeded)
-    db.prepare(`INSERT INTO sqlite_sequence(name, seq) VALUES ('enquiries', 100)`).run();
+  const seeded = await client.execute(
+    `SELECT 1 FROM sqlite_sequence WHERE name = 'enquiries'`
+  );
+  if (seeded.rows.length === 0) {
+    await client.execute(
+      `INSERT INTO sqlite_sequence(name, seq) VALUES ('enquiries', 100)`
+    );
+  }
 
-  return db;
+  return client;
 }
 
 // Next.js reloads modules in dev; keep one connection per process. Opening is
 // deferred to the first query so that builds and type checks never touch the
-// database file.
-const globalForDb = globalThis as unknown as { __workshopDb?: DatabaseSync };
+// database.
+const globalForDb = globalThis as unknown as {
+  __workshopDb?: Client;
+  __workshopDbInit?: Promise<Client>;
+};
 
-function connection(): DatabaseSync {
-  if (!globalForDb.__workshopDb) globalForDb.__workshopDb = open();
+async function connection(): Promise<Client> {
+  if (globalForDb.__workshopDb) return globalForDb.__workshopDb;
+  if (!globalForDb.__workshopDbInit) globalForDb.__workshopDbInit = open();
+  globalForDb.__workshopDb = await globalForDb.__workshopDbInit;
   return globalForDb.__workshopDb;
 }
 
-export const db = new Proxy({} as DatabaseSync, {
-  get(_target, property) {
-    const conn = connection();
-    const value = Reflect.get(conn, property);
-    return typeof value === "function" ? value.bind(conn) : value;
-  },
-});
+/** Run a SELECT and get the first row, or null. */
+export async function queryOne<T = Record<string, unknown>>(
+  sql: string,
+  args: unknown[] = []
+): Promise<T | null> {
+  const db = await connection();
+  const result = await db.execute({ sql, args: args as never });
+  return (result.rows[0] as T) ?? null;
+}
+
+/** Run a SELECT and get all rows. */
+export async function queryAll<T = Record<string, unknown>>(
+  sql: string,
+  args: unknown[] = []
+): Promise<T[]> {
+  const db = await connection();
+  const result = await db.execute({ sql, args: args as never });
+  return result.rows as T[];
+}
+
+/** Run an INSERT/UPDATE/DELETE. Returns last insert id and rows affected. */
+export async function run(
+  sql: string,
+  args: unknown[] = []
+): Promise<{ lastInsertRowid: bigint | number | undefined; changes: number }> {
+  const db = await connection();
+  const result = await db.execute({ sql, args: args as never });
+  return {
+    lastInsertRowid: result.lastInsertRowid,
+    changes: result.rowsAffected,
+  };
+}
+
+/** Run several statements as one atomic transaction. */
+export async function transaction(
+  statements: { sql: string; args?: unknown[] }[]
+): Promise<void> {
+  const db = await connection();
+  await db.batch(
+    statements.map((s) => ({ sql: s.sql, args: (s.args ?? []) as never })),
+    "write"
+  );
+}
+export async function getClient(): Promise<Client> {
+  return connection();
+}

@@ -1,4 +1,4 @@
-import { db } from "@/lib/db";
+import { queryOne, queryAll, run, getClient } from "@/lib/db";
 import {
   canTransition,
   today,
@@ -65,78 +65,84 @@ export type NewEnquiry = {
   items: Omit<EnquiryItem, "id">[];
 };
 
-export function createEnquiry(input: NewEnquiry): Enquiry {
+export async function createEnquiry(input: NewEnquiry): Promise<Enquiry> {
   const now = new Date().toISOString();
-  const insert = db.prepare(
-    `INSERT INTO enquiries
-       (customer_name, phone, delivery_mode, address, installation, photo, photo_type,
-        status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?, ?)`,
-  );
-  const itemStmt = db.prepare(
-    `INSERT INTO enquiry_items
-       (enquiry_id, position, furniture_type, other_description, measurements,
-        quantity, wood_finish, special_requirements)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  );
-
-  db.exec("BEGIN");
+  const client = await getClient();
+  const tx = await client.transaction("write");
   try {
-    const res = insert.run(
-      input.customerName,
-      input.phone,
-      input.deliveryMode,
-      input.address,
-      input.installation ? 1 : 0,
-      input.photo ? input.photo.data : null,
-      input.photo ? input.photo.type : null,
-      now,
-      now,
-    );
-    const id = Number(res.lastInsertRowid);
-    input.items.forEach((item, i) => {
-      itemStmt.run(
-        id,
-        i,
-        item.furnitureType,
-        item.otherDescription,
-        item.measurements,
-        item.quantity,
-        item.woodFinish,
-        item.specialRequirements,
-      );
+    const insertRes = await tx.execute({
+      sql: `INSERT INTO enquiries
+              (customer_name, phone, delivery_mode, address, installation, photo, photo_type,
+               status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?, ?)`,
+      args: [
+        input.customerName,
+        input.phone,
+        input.deliveryMode,
+        input.address,
+        input.installation ? 1 : 0,
+        input.photo ? input.photo.data : null,
+        input.photo ? input.photo.type : null,
+        now,
+        now,
+      ],
     });
-    db.prepare(
-      `INSERT INTO status_history (enquiry_id, from_status, to_status, at)
-       VALUES (?, NULL, 'New', ?)`,
-    ).run(id, now);
-    db.exec("COMMIT");
-    return getEnquiry(id)!;
+    const id = Number(insertRes.lastInsertRowid);
+
+    for (let i = 0; i < input.items.length; i++) {
+      const item = input.items[i];
+      await tx.execute({
+        sql: `INSERT INTO enquiry_items
+                (enquiry_id, position, furniture_type, other_description, measurements,
+                 quantity, wood_finish, special_requirements)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          id,
+          i,
+          item.furnitureType,
+          item.otherDescription,
+          item.measurements,
+          item.quantity,
+          item.woodFinish,
+          item.specialRequirements,
+        ],
+      });
+    }
+
+    await tx.execute({
+      sql: `INSERT INTO status_history (enquiry_id, from_status, to_status, at)
+            VALUES (?, NULL, 'New', ?)`,
+      args: [id, now],
+    });
+
+    await tx.commit();
+    return (await getEnquiry(id))!;
   } catch (err) {
-    db.exec("ROLLBACK");
+    await tx.rollback();
     throw err;
   }
 }
 
-export function getEnquiry(id: number): Enquiry | null {
-  const row = db
-    .prepare(`SELECT ${COLUMNS} FROM enquiries WHERE id = ?`)
-    .get(id) as Row | undefined;
+export async function getEnquiry(id: number): Promise<Enquiry | null> {
+  const row = await queryOne<Row>(
+    `SELECT ${COLUMNS} FROM enquiries WHERE id = ?`,
+    [id],
+  );
   if (!row) return null;
-  const items = db
-    .prepare(
-      `SELECT * FROM enquiry_items WHERE enquiry_id = ? ORDER BY position, id`,
-    )
-    .all(id) as Row[];
+  const items = await queryAll<Row>(
+    `SELECT * FROM enquiry_items WHERE enquiry_id = ? ORDER BY position, id`,
+    [id],
+  );
   return mapEnquiry(row, items.map(mapItem));
 }
 
-export function getPhoto(
+export async function getPhoto(
   id: number,
-): { data: Uint8Array; type: string } | null {
-  const row = db
-    .prepare(`SELECT photo, photo_type FROM enquiries WHERE id = ?`)
-    .get(id) as Row | undefined;
+): Promise<{ data: Uint8Array; type: string } | null> {
+  const row = await queryOne<Row>(
+    `SELECT photo, photo_type FROM enquiries WHERE id = ?`,
+    [id],
+  );
   if (!row?.photo) return null;
   return {
     data: new Uint8Array(row.photo as ArrayBuffer),
@@ -145,7 +151,7 @@ export function getPhoto(
 }
 
 /** Newest first — "I want to see what just came in at the top." */
-export function listEnquiries(opts: { status?: string; q?: string } = {}) {
+export async function listEnquiries(opts: { status?: string; q?: string } = {}) {
   const where: string[] = [];
   const params: (string | number)[] = [];
 
@@ -153,30 +159,27 @@ export function listEnquiries(opts: { status?: string; q?: string } = {}) {
     where.push("status = ?");
     params.push(opts.status);
   }
-  // "Search by name and order number both."
   const q = opts.q?.trim();
   if (q) {
     where.push("(LOWER(customer_name) LIKE ? OR CAST(id AS TEXT) = ?)");
     params.push(`%${q.toLowerCase()}%`, q.replace(/^#/, ""));
   }
 
-  const rows = db
-    .prepare(
-      `SELECT ${COLUMNS} FROM enquiries
-       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
-       ORDER BY created_at DESC, id DESC`,
-    )
-    .all(...params) as Row[];
+  const rows = await queryAll<Row>(
+    `SELECT ${COLUMNS} FROM enquiries
+     ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+     ORDER BY created_at DESC, id DESC`,
+    params,
+  );
 
   if (!rows.length) return [];
   const ids = rows.map((r) => Number(r.id));
-  const items = db
-    .prepare(
-      `SELECT * FROM enquiry_items
-       WHERE enquiry_id IN (${ids.map(() => "?").join(",")})
-       ORDER BY position, id`,
-    )
-    .all(...ids) as Row[];
+  const items = await queryAll<Row>(
+    `SELECT * FROM enquiry_items
+     WHERE enquiry_id IN (${ids.map(() => "?").join(",")})
+     ORDER BY position, id`,
+    ids,
+  );
 
   const byEnquiry = new Map<number, EnquiryItem[]>();
   for (const it of items) {
@@ -187,10 +190,10 @@ export function listEnquiries(opts: { status?: string; q?: string } = {}) {
   return rows.map((r) => mapEnquiry(r, byEnquiry.get(Number(r.id)) ?? []));
 }
 
-export function statusCounts(): Record<string, number> {
-  const rows = db
-    .prepare(`SELECT status, COUNT(*) AS c FROM enquiries GROUP BY status`)
-    .all() as Row[];
+export async function statusCounts(): Promise<Record<string, number>> {
+  const rows = await queryAll<Row>(
+    `SELECT status, COUNT(*) AS c FROM enquiries GROUP BY status`,
+  );
   const counts: Record<string, number> = { All: 0 };
   for (const r of rows) {
     counts[String(r.status)] = Number(r.c);
@@ -220,77 +223,82 @@ export type UpdatableField = keyof typeof STAGE_FIELDS;
 export class RuleError extends Error {}
 
 /** Partial update of enquiry fields (admin edit + per-stage detail fields). */
-export function updateEnquiry(
+export async function updateEnquiry(
   id: number,
   patch: Partial<Record<UpdatableField, unknown>>,
   items?: Omit<EnquiryItem, "id">[],
-): Enquiry {
-  const existing = getEnquiry(id);
+): Promise<Enquiry> {
+  const existing = await getEnquiry(id);
   if (!existing) throw new RuleError("Enquiry not found.");
+  if (items && !items.length)
+    throw new RuleError("An enquiry needs at least one item.");
 
   const sets: string[] = [];
   const params: (string | number | null)[] = [];
   for (const [key, column] of Object.entries(STAGE_FIELDS)) {
     if (!(key in patch)) continue;
     let value = patch[key as UpdatableField];
-    if (key === "balancePaid" || key === "installation")
-      value = value ? 1 : 0;
+    if (key === "balancePaid" || key === "installation") value = value ? 1 : 0;
     if (value === "") value = null;
     sets.push(`${column} = ?`);
     params.push(value as string | number | null);
   }
 
-  db.exec("BEGIN");
+  const client = await getClient();
+  const tx = await client.transaction("write");
   try {
     if (sets.length) {
       sets.push("updated_at = ?");
       params.push(new Date().toISOString());
-      db.prepare(`UPDATE enquiries SET ${sets.join(", ")} WHERE id = ?`).run(
-        ...params,
-        id,
-      );
+      await tx.execute({
+        sql: `UPDATE enquiries SET ${sets.join(", ")} WHERE id = ?`,
+        args: [...params, id],
+      });
     }
     if (items) {
-      if (!items.length) throw new RuleError("An enquiry needs at least one item.");
-      db.prepare(`DELETE FROM enquiry_items WHERE enquiry_id = ?`).run(id);
-      const stmt = db.prepare(
-        `INSERT INTO enquiry_items
-           (enquiry_id, position, furniture_type, other_description, measurements,
-            quantity, wood_finish, special_requirements)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      );
-      items.forEach((item, i) =>
-        stmt.run(
-          id,
-          i,
-          item.furnitureType,
-          item.otherDescription,
-          item.measurements,
-          item.quantity,
-          item.woodFinish,
-          item.specialRequirements,
-        ),
-      );
-      db.prepare(`UPDATE enquiries SET updated_at = ? WHERE id = ?`).run(
-        new Date().toISOString(),
-        id,
-      );
+      await tx.execute({
+        sql: `DELETE FROM enquiry_items WHERE enquiry_id = ?`,
+        args: [id],
+      });
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        await tx.execute({
+          sql: `INSERT INTO enquiry_items
+                  (enquiry_id, position, furniture_type, other_description, measurements,
+                   quantity, wood_finish, special_requirements)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [
+            id,
+            i,
+            item.furnitureType,
+            item.otherDescription,
+            item.measurements,
+            item.quantity,
+            item.woodFinish,
+            item.specialRequirements,
+          ],
+        });
+      }
+      await tx.execute({
+        sql: `UPDATE enquiries SET updated_at = ? WHERE id = ?`,
+        args: [new Date().toISOString(), id],
+      });
     }
-    db.exec("COMMIT");
+    await tx.commit();
   } catch (err) {
-    db.exec("ROLLBACK");
+    await tx.rollback();
     throw err;
   }
-  return getEnquiry(id)!;
+  return (await getEnquiry(id))!;
 }
 
 /** Status changes are guarded by the agreed order. */
-export function changeStatus(
+export async function changeStatus(
   id: number,
   to: Status,
   extra: Partial<Record<UpdatableField, unknown>> = {},
-): Enquiry {
-  const existing = getEnquiry(id);
+): Promise<Enquiry> {
+  const existing = await getEnquiry(id);
   if (!existing) throw new RuleError("Enquiry not found.");
   if (!canTransition(existing.status, to))
     throw new RuleError(transitionError(existing.status, to));
@@ -298,52 +306,48 @@ export function changeStatus(
   const now = new Date().toISOString();
   const patch: Partial<Record<UpdatableField, unknown>> = { ...extra };
 
-  // "The date gets recorded automatically when I move it to In Progress."
-  // The workshop's local date, not UTC — an evening entry must not jump a day.
   if (to === "In Progress" && !existing.workStartedDate && !patch.workStartedDate)
     patch.workStartedDate = today();
   if (to === "Delivered" && !existing.actualDeliveryDate && !patch.actualDeliveryDate)
     patch.actualDeliveryDate = today();
-  // Reopening a cancelled/rejected enquiry sends it back to the start.
   if (to === "New") {
     patch.workStartedDate = null;
     patch.actualDeliveryDate = null;
   }
 
-  db.exec("BEGIN");
+  const client = await getClient();
+  const tx = await client.transaction("write");
   try {
-    db.prepare(`UPDATE enquiries SET status = ?, updated_at = ? WHERE id = ?`).run(
-      to,
-      now,
-      id,
-    );
-    db.prepare(
-      `INSERT INTO status_history (enquiry_id, from_status, to_status, at)
-       VALUES (?, ?, ?, ?)`,
-    ).run(id, existing.status, to, now);
-    db.exec("COMMIT");
+    await tx.execute({
+      sql: `UPDATE enquiries SET status = ?, updated_at = ? WHERE id = ?`,
+      args: [to, now, id],
+    });
+    await tx.execute({
+      sql: `INSERT INTO status_history (enquiry_id, from_status, to_status, at)
+            VALUES (?, ?, ?, ?)`,
+      args: [id, existing.status, to, now],
+    });
+    await tx.commit();
   } catch (err) {
-    db.exec("ROLLBACK");
+    await tx.rollback();
     throw err;
   }
   return updateEnquiry(id, patch);
 }
 
 /** "Delete means it's gone completely." */
-export function deleteEnquiry(id: number): boolean {
-  const res = db.prepare(`DELETE FROM enquiries WHERE id = ?`).run(id);
-  return Number(res.changes) > 0;
+export async function deleteEnquiry(id: number): Promise<boolean> {
+  const res = await run(`DELETE FROM enquiries WHERE id = ?`, [id]);
+  return res.changes > 0;
 }
 
-export function statusHistory(id: number) {
-  return (
-    db
-      .prepare(
-        `SELECT from_status, to_status, at FROM status_history
-         WHERE enquiry_id = ? ORDER BY id`,
-      )
-      .all(id) as Row[]
-  ).map((r) => ({
+export async function statusHistory(id: number) {
+  const rows = await queryAll<Row>(
+    `SELECT from_status, to_status, at FROM status_history
+     WHERE enquiry_id = ? ORDER BY id`,
+    [id],
+  );
+  return rows.map((r) => ({
     from: s(r.from_status),
     to: String(r.to_status),
     at: String(r.at),

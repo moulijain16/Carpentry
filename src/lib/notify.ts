@@ -1,30 +1,30 @@
 /**
- * "I should get a notification on my phone when a new enquiry comes in."
- *
- * Sends an SMS through Twilio when TWILIO_* env vars are configured. With no
- * provider configured the message is still recorded in the notifications table
- * (and logged), so nothing is silently lost and the dashboard bell still works.
+ * Sends an SMS through Twilio when configured.
+ * Without Twilio, the notification is still recorded in Turso.
  */
-import { db } from "@/lib/db";
+
+import { queryOne, run } from "@/lib/db";
 import { itemSummary, type Enquiry } from "@/lib/domain";
 
-function record(
+async function record(
   enquiryId: number,
   channel: string,
   message: string,
   status: string,
   detail?: string,
 ) {
-  db.prepare(
-    `INSERT INTO notifications (enquiry_id, channel, message, status, detail, at)
+  await run(
+    `INSERT INTO notifications
+      (enquiry_id, channel, message, status, detail, at)
      VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(
-    enquiryId,
-    channel,
-    message,
-    status,
-    detail ?? null,
-    new Date().toISOString(),
+    [
+      enquiryId,
+      channel,
+      message,
+      status,
+      detail ?? null,
+      new Date().toISOString(),
+    ],
   );
 }
 
@@ -40,7 +40,15 @@ export async function notifyNewEnquiry(enquiry: Enquiry): Promise<void> {
 
   if (!sid || !token || !from || !to) {
     console.info(`[notify:sms-not-configured] ${message}`);
-    record(enquiry.id, "sms", message, "skipped", "SMS provider not configured");
+
+    await record(
+      enquiry.id,
+      "sms",
+      message,
+      "skipped",
+      "SMS provider not configured",
+    );
+
     return;
   }
 
@@ -53,21 +61,39 @@ export async function notifyNewEnquiry(enquiry: Enquiry): Promise<void> {
           Authorization: `Basic ${btoa(`${sid}:${token}`)}`,
           "Content-Type": "application/x-www-form-urlencoded",
         },
-        body: new URLSearchParams({ From: from, To: to, Body: message }),
+        body: new URLSearchParams({
+          From: from,
+          To: to,
+          Body: message,
+        }),
       },
     );
-    if (!res.ok) throw new Error(`Twilio responded ${res.status}`);
-    record(enquiry.id, "sms", message, "sent");
+
+    if (!res.ok) {
+      throw new Error(`Twilio responded ${res.status}`);
+    }
+
+    await record(enquiry.id, "sms", message, "sent");
   } catch (err) {
     console.error("[notify:sms-failed]", err);
-    record(enquiry.id, "sms", message, "failed", String(err));
+
+    await record(
+      enquiry.id,
+      "sms",
+      message,
+      "failed",
+      String(err),
+    );
   }
 }
 
-/** Unread-style count for the dashboard: enquiries still sitting at New. */
-export function newEnquiryCount(): number {
-  const row = db
-    .prepare(`SELECT COUNT(*) AS c FROM enquiries WHERE status = 'New'`)
-    .get() as { c: number };
-  return Number(row.c);
+/** Unread-style count for the dashboard. */
+export async function newEnquiryCount(): Promise<number> {
+  const row = await queryOne<{ c: number }>(
+    `SELECT COUNT(*) AS c
+     FROM enquiries
+     WHERE status = 'New'`,
+  );
+
+  return Number(row?.c ?? 0);
 }
