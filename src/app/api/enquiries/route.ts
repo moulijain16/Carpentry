@@ -16,7 +16,7 @@ export async function POST(request: NextRequest) {
   const { data, errors } = await parseEnquiryForm(form);
   if (errors) return NextResponse.json({ errors }, { status: 422 });
 
-  const enquiry = createEnquiry(data!);
+  const enquiry = await createEnquiry(data!);
   // Fire-and-forget so the customer isn't waiting on the SMS provider.
   void notifyNewEnquiry(enquiry).catch(() => {});
 
@@ -30,7 +30,7 @@ export async function GET(request: NextRequest) {
 
   const { searchParams } = request.nextUrl;
   return NextResponse.json({
-    enquiries: listEnquiries({
+    enquiries: await listEnquiries({
       status: searchParams.get("status") ?? undefined,
       q: searchParams.get("q") ?? undefined,
     }),

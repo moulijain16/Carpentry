@@ -14,12 +14,12 @@ export default async function DashboardPage({
   searchParams: Promise<{ status?: string; q?: string }>;
 }) {
   const { status, q } = await searchParams;
-  const enquiries = listEnquiries({ status, q });
-  const counts = statusCounts();
+  const enquiries =  await listEnquiries({ status, q });
+  const counts = await statusCounts();
 
   // "Every morning I want to see which orders are due for delivery in the next
   //  few days so I don't break any promises to customers."
-  const dueSoon = listEnquiries()
+  const dueSoon =  (await listEnquiries())
     .map((enquiry) => ({ enquiry, urgency: deliveryUrgency(enquiry) }))
     .filter((row) => row.urgency !== null)
     .sort(

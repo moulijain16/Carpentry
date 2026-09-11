@@ -17,13 +17,13 @@ export default async function EnquiryDetailPage({
   const enquiryId = Number(id);
   if (!Number.isInteger(enquiryId)) notFound();
 
-  const enquiry = getEnquiry(enquiryId);
+  const enquiry =  await getEnquiry(enquiryId);
   if (!enquiry) notFound();
 
   return (
     <EnquiryDetail
       initialEnquiry={enquiry}
-      initialHistory={statusHistory(enquiryId)}
+      initialHistory={ await statusHistory(enquiryId)}
       startInEdit={edit === "1"}
     />
   );

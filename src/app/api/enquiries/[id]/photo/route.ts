@@ -10,7 +10,7 @@ export async function GET(
   if (!(await getSession()))
     return NextResponse.json({ error: "Not signed in." }, { status: 401 });
 
-  const photo = getPhoto(Number((await ctx.params).id));
+  const photo =  await getPhoto(Number((await ctx.params).id));
   if (!photo)
     return NextResponse.json({ error: "No photo." }, { status: 404 });
 
