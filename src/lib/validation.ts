@@ -26,10 +26,14 @@ export async function parseEnquiryForm(
     errors.customerName = "Name is too long.";
 
   const phone = text(form.get("phone"));
-  const digits = phone.replace(/\D/g, "");
-  if (!phone) errors.phone = "Please enter your phone number.";
-  else if (digits.length < 10 || digits.length > 15)
-    errors.phone = "Please enter a valid phone number (at least 10 digits).";
+const digits = phone.replace(/\D/g, "");
+
+if (!phone) {
+  errors.phone = "Please enter your phone number.";
+} else if (!/^[6-9][0-9]{9}$/.test(digits)) {
+  errors.phone =
+    "Please enter a valid 10-digit mobile number";
+}
 
   const deliveryModeRaw = text(form.get("deliveryMode"));
   const deliveryMode =

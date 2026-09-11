@@ -158,7 +158,7 @@ export default function EnquiryDetail({
               {enquiry.customerName}
             </h1>
             <a
-              href={`tel:${enquiry.phone.replace(/\s/g, "")}`}
+              href={`tel:${(enquiry.phone ?? "").replace(/\s/g, "")}`}
               className="text-sm font-semibold text-bark-600 hover:underline"
             >
               {enquiry.phone}
@@ -461,10 +461,17 @@ function EditDetails({
 
   function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!customerName.trim() || !phone.trim()) {
-      setProblem("Customer name and phone number cannot be empty.");
-      return;
-    }
+   if (!customerName.trim()) {
+  setProblem("Customer name cannot be empty.");
+  return;
+}
+
+if (!/^[6-9][0-9]{9}$/.test(phone)) {
+  setProblem(
+    "Phone number must be exactly 10 digits and start with 6, 7, 8, or 9.",
+  );
+  return;
+}
     if (items.some((i) => !i.furnitureType || !i.measurements.trim())) {
       setProblem("Every item needs a furniture type and measurements.");
       return;
@@ -513,13 +520,18 @@ function EditDetails({
       </div>
       <div>
         <label htmlFor={`${uid}-phone`} className="label">Phone</label>
-        <input
-          id={`${uid}-phone`}
-          value={phone}
-          onChange={(e) => setPhone(e.target.value)}
-          type="tel"
-          className="field"
-        />
+      <input
+  id={`${uid}-phone`}
+  value={phone}
+  onChange={(e) =>
+    setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))
+  }
+  type="tel"
+  inputMode="numeric"
+  maxLength={10}
+  pattern="[6-9][0-9]{9}"
+  className="field"
+/>
       </div>
       <div>
         <label htmlFor={`${uid}-delivery-or-pickup`} className="label">Delivery or pickup</label>
@@ -606,6 +618,12 @@ function AcceptPanel({
 
   function accept(event: React.FormEvent) {
     event.preventDefault();
+    if (!/^[6-9][0-9]{9}$/.test(enquiry.phone)) {
+  setProblem(
+    "Cannot accept enquiry. Phone number must be exactly 10 digits and start with 6, 7, 8, or 9.",
+  );
+  return;
+}
     if (!price.trim() || Number(price) <= 0) {
       setProblem("Enter the estimated price before accepting.");
       return;

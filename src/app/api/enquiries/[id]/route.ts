@@ -24,10 +24,10 @@ export async function GET(_request: NextRequest, ctx: Ctx) {
   if (denied) return denied;
 
   const id = Number((await ctx.params).id);
-  const enquiry = getEnquiry(id);
+  const enquiry =  await getEnquiry(id);
   if (!enquiry)
     return NextResponse.json({ error: "Enquiry not found." }, { status: 404 });
-  return NextResponse.json({ enquiry, history: statusHistory(id) });
+  return NextResponse.json({ enquiry, history:  await statusHistory(id) });
 }
 
 /** Edit fields, and/or move the enquiry to the next status. */
@@ -54,19 +54,19 @@ export async function PATCH(request: NextRequest, ctx: Ctx) {
     if (status !== undefined) {
       if (!(STATUSES as readonly string[]).includes(status))
         return NextResponse.json({ error: "Unknown status." }, { status: 400 });
-      enquiry = changeStatus(
+      enquiry =  await changeStatus(
         id,
         status as Status,
         fields as Partial<Record<UpdatableField, unknown>>,
       );
     } else {
-      enquiry = updateEnquiry(
+      enquiry =  await updateEnquiry(
         id,
         fields as Partial<Record<UpdatableField, unknown>>,
         items as never,
       );
     }
-    return NextResponse.json({ enquiry, history: statusHistory(id) });
+    return NextResponse.json({ enquiry, history:  await statusHistory(id) });
   } catch (err) {
     if (err instanceof RuleError)
       return NextResponse.json({ error: err.message }, { status: 409 });
@@ -80,7 +80,7 @@ export async function DELETE(_request: NextRequest, ctx: Ctx) {
   if (denied) return denied;
 
   const id = Number((await ctx.params).id);
-  if (!deleteEnquiry(id))
+  if (! (await deleteEnquiry(id)))
     return NextResponse.json({ error: "Enquiry not found." }, { status: 404 });
   return NextResponse.json({ ok: true });
 }

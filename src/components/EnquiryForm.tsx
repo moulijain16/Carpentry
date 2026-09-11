@@ -171,15 +171,20 @@ export default function EnquiryForm() {
               Phone number <span className="text-red-500">*</span>
             </label>
             <input
-              id="phone"
-              name="phone"
-              type="tel"
-              inputMode="tel"
-              autoComplete="tel"
-              data-invalid={Boolean(errors.phone)}
-              className={`field ${errors.phone ? "field-error" : ""}`}
-              placeholder="e.g. 98765 43210"
-            />
+  id="phone"
+  name="phone"
+  type="tel"
+  inputMode="numeric"
+  maxLength={10}
+  pattern="[6-9][0-9]{9}"
+  onInput={(e) => {
+    e.currentTarget.value = e.currentTarget.value
+      .replace(/\D/g, "")
+      .slice(0, 10);
+  }}
+  data-invalid={Boolean(errors.phone)}
+  className={`field ${errors.phone ? "field-error" : ""}`}
+/>
             <FieldError message={errors.phone} />
           </div>
         </div>
